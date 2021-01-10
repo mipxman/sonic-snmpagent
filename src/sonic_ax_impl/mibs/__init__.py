@@ -2,7 +2,7 @@ import pprint
 import re
 import os
 
-from swsscommon.swsscommon import SonicV2Connector
+from swsssdk import SonicV2Connector
 from swsssdk import SonicDBConfig
 from swsssdk import port_util
 from swsssdk.port_util import get_index_from_str
@@ -25,18 +25,22 @@ SNMP_OVERLAY_DB = 'SNMP_OVERLAY_DB'
 TABLE_NAME_SEPARATOR_COLON = ':'
 TABLE_NAME_SEPARATOR_VBAR = '|'
 
-RIF_COUNTERS_AGGR_MAP = {
-    "SAI_PORT_STAT_IF_IN_OCTETS": "SAI_ROUTER_INTERFACE_STAT_IN_OCTETS",
-    "SAI_PORT_STAT_IF_IN_UCAST_PKTS": "SAI_ROUTER_INTERFACE_STAT_IN_PACKETS",
-    "SAI_PORT_STAT_IF_IN_ERRORS": "SAI_ROUTER_INTERFACE_STAT_IN_ERROR_PACKETS",
-    "SAI_PORT_STAT_IF_OUT_OCTETS": "SAI_ROUTER_INTERFACE_STAT_OUT_OCTETS",
-    "SAI_PORT_STAT_IF_OUT_UCAST_PKTS": "SAI_ROUTER_INTERFACE_STAT_OUT_PACKETS",
-    "SAI_PORT_STAT_IF_OUT_ERRORS": "SAI_ROUTER_INTERFACE_STAT_OUT_ERROR_PACKETS"
-}
-
-RIF_DROPS_AGGR_MAP = {
-    "SAI_PORT_STAT_IF_IN_ERRORS": "SAI_ROUTER_INTERFACE_STAT_IN_ERROR_PACKETS",
-    "SAI_PORT_STAT_IF_OUT_ERRORS": "SAI_ROUTER_INTERFACE_STAT_OUT_ERROR_PACKETS"
+# This is used in both rfc2737 and rfc3433
+SENSOR_PART_ID_MAP = {
+    "temperature":  1,
+    "voltage":      2,
+    "rx1power":     11,
+    "rx2power":     21,
+    "rx3power":     31,
+    "rx4power":     41,
+    "tx1bias":      12,
+    "tx2bias":      22,
+    "tx3bias":      32,
+    "tx4bias":      42,
+    "tx1power":     13,
+    "tx2power":     23,
+    "tx3power":     33,
+    "tx4power":     43,
 }
 
 # IfIndex to OID multiplier for transceiver
@@ -61,22 +65,6 @@ def chassis_info_table(chassis_name):
 
     return "CHASSIS_INFO" + TABLE_NAME_SEPARATOR_VBAR + chassis_name
 
-def fan_info_table(fan_name):
-    """
-    :param: fan_name: fan name
-    :return: fan info entry for this fan
-    """
-    return 'FAN_INFO' + TABLE_NAME_SEPARATOR_VBAR + fan_name
-
-
-def fan_drawer_info_table(drawer_name):
-    """
-    :param: drawer_name: fan drawer name
-    :return: fan drawer info entry for this fan
-    """
-    return 'FAN_DRAWER_INFO' + TABLE_NAME_SEPARATOR_VBAR + drawer_name
-
-
 def psu_info_table(psu_name):
     """
     :param: psu_name: psu name
@@ -84,15 +72,6 @@ def psu_info_table(psu_name):
     """
 
     return "PSU_INFO" + TABLE_NAME_SEPARATOR_VBAR + psu_name
-
-
-def physical_entity_info_table(name):
-    """
-    :param: name: object name
-    :return: entity info entry for this object
-    """
-    return 'PHYSICAL_ENTITY_INFO' + TABLE_NAME_SEPARATOR_VBAR + name
-
 
 def counter_table(sai_id):
     """
@@ -127,14 +106,6 @@ def transceiver_dom_table(port_name):
 
     return "TRANSCEIVER_DOM_SENSOR" + TABLE_NAME_SEPARATOR_VBAR + port_name
 
-def thermal_info_table(thermal_name):
-    """
-    :param: port_name: port name
-    :return: transceiver dom entry for this port
-    """
-
-    return "TEMPERATURE_INFO" + TABLE_NAME_SEPARATOR_VBAR + thermal_name
-
 def lldp_entry_table(if_name):
     """
     :param if_name: given interface to cast.
@@ -150,13 +121,12 @@ def if_entry_table(if_name):
     """
     return 'PORT_TABLE:' + if_name
 
-
-def vlan_entry_table(if_name):
+def if_vlan_entry_table(if_vlan_name):
     """
     :param if_name: given interface to cast.
     :return: VLAN_TABLE key.
     """
-    return 'VLAN_TABLE:' + if_name
+    return 'VLAN_TABLE:' + if_vlan_name
 
 
 def lag_entry_table(lag_name):
@@ -270,7 +240,7 @@ def init_sync_d_interface_tables(db_conn):
     for if_name, sai_id in if_name_map_util.items():
         if_name_str = if_name
         if (re.match(port_util.SONIC_ETHERNET_RE_PATTERN, if_name_str) or \
-                re.match(port_util.SONIC_ETHERNET_BP_RE_PATTERN, if_name_str)):
+                re.match(port_util.SONIC_ETHERNET_BP_RE_PATTERN, if_name_str)) :
             if_name_map[if_name] = sai_id
     # As sai_id is not unique in multi-asic platform, concatenate it with
     # namespace to get a unique key. Assuming that ':' is not present in namespace
@@ -278,7 +248,7 @@ def init_sync_d_interface_tables(db_conn):
     # sai_id_key = namespace : sai_id
     for sai_id, if_name in if_id_map_util.items():
         if (re.match(port_util.SONIC_ETHERNET_RE_PATTERN, if_name) or \
-                re.match(port_util.SONIC_ETHERNET_BP_RE_PATTERN, if_name)):
+                re.match(port_util.SONIC_ETHERNET_BP_RE_PATTERN, if_name)):    
             if_id_map[get_sai_id_key(db_conn.namespace, sai_id)] = if_name
     logger.debug("Port name map:\n" + pprint.pformat(if_name_map, indent=2))
     logger.debug("Interface name map:\n" + pprint.pformat(if_id_map, indent=2))
@@ -314,47 +284,63 @@ def init_sync_d_interface_tables(db_conn):
     logger.debug("Chassis name map:\n" + pprint.pformat(if_alias_map, indent=2))
 
     return if_name_map, if_alias_map, if_id_map, oid_name_map
-
-
-def init_sync_d_rif_tables(db_conn):
-    """
-    Initializes map of RIF SAI oids to port SAI oid.
-    :return: dict
-    """
-    rif_port_map = {get_sai_id_key(db_conn.namespace, rif): get_sai_id_key(db_conn.namespace, port)
-                    for rif, port in port_util.get_rif_port_map(db_conn).items()}
-    port_rif_map = {port: rif for rif, port in rif_port_map.items()}
-    logger.debug("Rif port map:\n" + pprint.pformat(rif_port_map, indent=2))
-
-    return rif_port_map, port_rif_map
-
-
 def init_sync_d_vlan_tables(db_conn):
     """
-    Initializes vlan interface maps for SyncD-connected MIB(s).
-    :return: tuple(vlan_name_map, oid_sai_map, oid_name_map)
+    Initializes interface maps for SyncD-connected MIB(s).
+    :return: tuple(if_vlan_name_map, if_vlan_id_map, oid_vlan_map, if_vlan_alias_map)
     """
+    if_vlan_id_map = {}
+    if_vlan_name_map = {}
 
-    vlan_name_map = port_util.get_vlan_interface_oid_map(db_conn)
+    # { if_vlan_name (SONiC) -> sai_id }
+    # ex: { "Vlan100" : "6000000000023" }
+    if_vlan_name_map_util, if_vlan_id_map_util = port_util.get_vlan_interface_oid_map(db_conn)
+    for if_vlan_name, sai_id in if_vlan_name_map_util.items():
+        if_vlan_name_str = if_vlan_name
+        if (re.match(port_util.SONIC_VLAN_RE_PATTERN, if_vlan_name_str)):
+            if_vlan_name_map[if_vlan_name] = sai_id
+    # As sai_id is not unique in multi-asic platform, concatenate it with
+    # namespace to get a unique key. Assuming that ':' is not present in namespace
+    # string or in sai id.
+    # sai_id_key = namespace : sai_id
+    for sai_id, if_vlan_name in if_vlan_id_map_util.items():
+        if (re.match(port_util.SONIC_VLAN_RE_PATTERN, if_vlan_name)):    
+            if_vlan_id_map[get_sai_id_key(db_conn.namespace, sai_id)] = if_vlan_name
+    logger.debug("Vlan name map:\n" + pprint.pformat(if_vlan_name_map, indent=2))
+    logger.debug("Interface Vlan name map:\n" + pprint.pformat(if_vlan_id_map, indent=2))
 
-    logger.debug("Vlan oid map:\n" + pprint.pformat(vlan_name_map, indent=2))
+    # { OID -> if_vlan_name (SONiC) }
+    oid_vlan_name_map = {get_index_from_str(if_vlan_name): if_vlan_name for if_vlan_name in if_vlan_name_map
+                    # only map the interface if it's a style understood to be a SONiC interface Vlan.
+                    if get_index_from_str(if_vlan_name) is not None}
 
-    # { OID -> sai_id }
-    oid_sai_map = {get_index_from_str(if_name): sai_id for sai_id, if_name in vlan_name_map.items()
-                   # only map the interface if it's a style understood to be a SONiC interface.
-                   if get_index_from_str(if_name) is not None}
-    logger.debug("OID sai map:\n" + pprint.pformat(oid_sai_map, indent=2))
+    logger.debug("OID vlan name map:\n" + pprint.pformat(oid_vlan_name_map, indent=2))
 
-    # { OID -> if_name (SONiC) }
-    oid_name_map = {get_index_from_str(if_name): if_name for sai_id, if_name in vlan_name_map.items()
-                   # only map the interface if it's a style understood to be a SONiC interface.
-                   if get_index_from_str(if_name) is not None}
+    # SyncD consistency checks.
+    if not oid_vlan_name_map:
+        # In the event no interface exists that follows the SONiC pattern, no OIDs are able to be registered.
+        # A RuntimeError here will prevent the 'main' module from loading. (This is desirable.)
+        message = "No interfaces found matching pattern '{}'. SyncD database is incoherent." \
+            .format(port_util.SONIC_VLAN_RE_PATTERN)
+        logger.error(message)
+        raise RuntimeError(message)
+    elif len(if_vlan_id_map) < len(if_vlan_name_map) or len(oid_vlan_name_map) < len(if_vlan_name_map):
+        # a length mismatch indicates a bad interface name
+        logger.warning("SyncD database contains incoherent interface names. Interfaces must match pattern '{}'"
+                       .format(port_util.SONIC_VLAN_RE_PATTERN))
+        logger.warning("Vlan name map:\n" + pprint.pformat(if_name_map, indent=2))
 
-    logger.debug("OID name map:\n" + pprint.pformat(oid_name_map, indent=2))
 
-    return vlan_name_map, oid_sai_map, oid_name_map
+    if_vlan_alias_map = dict()
 
+    for if_vlan_name in if_vlan_name_map:
+        if_vlan_entry = db_conn.get_all(APPL_DB, if_vlan_entry_table(if_vlan_name), blocking=True)
+        if_vlan_alias_map[if_name] = if_entry.get('alias', if_vlan_name)
 
+    logger.debug("Chassis name map:\n" + pprint.pformat(if_alias_map, indent=2))
+
+    return if_vlan_name_map, if_vlan_alias_map, if_vlan_id_map, oid_vlan_name_map
+    
 def init_sync_d_lag_tables(db_conn):
     """
     Helper method. Connects to and initializes LAG interface maps for SyncD-connected MIB(s).
@@ -369,19 +355,13 @@ def init_sync_d_lag_tables(db_conn):
     if_name_lag_name_map = {}
     # { OID -> lag_name (SONiC) }
     oid_lag_name_map = {}
-    # { lag_name (SONiC) -> lag_oid (SAI) }
-    lag_sai_map = {}
 
     db_conn.connect(APPL_DB)
 
     lag_entries = db_conn.keys(APPL_DB, "LAG_TABLE:*")
 
     if not lag_entries:
-        return lag_name_if_name_map, if_name_lag_name_map, oid_lag_name_map, lag_sai_map
-
-    db_conn.connect(COUNTERS_DB)
-    lag_sai_map = db_conn.get_all(COUNTERS_DB, "COUNTERS_LAG_NAME_MAP")
-    lag_sai_map = {name: get_sai_id_key(db_conn.namespace, sai_id.lstrip("oid:0x")) for name, sai_id in lag_sai_map.items()}
+        return lag_name_if_name_map, if_name_lag_name_map, oid_lag_name_map
 
     for lag_entry in lag_entries:
         lag_name = lag_entry[len("LAG_TABLE:"):]
@@ -403,7 +383,7 @@ def init_sync_d_lag_tables(db_conn):
         if idx:
             oid_lag_name_map[idx] = if_name
 
-    return lag_name_if_name_map, if_name_lag_name_map, oid_lag_name_map, lag_sai_map
+    return lag_name_if_name_map, if_name_lag_name_map, oid_lag_name_map
 
 def init_sync_d_queue_tables(db_conn):
     """
@@ -418,7 +398,7 @@ def init_sync_d_queue_tables(db_conn):
 
     # Parse the queue_name_map and create the following maps:
     # port_queues_map -> {"port_index : queue_index" : sai_oid}
-    # queue_stat_map -> {"port_index : queue stat table name" : {counter name : value}}
+    # queue_stat_map -> {"port_index : queue stat table name" : {counter name : value}} 
     # port_queue_list_map -> {port_index: [sorted queue list]}
     port_queues_map = {}
     queue_stat_map = {}
@@ -469,6 +449,40 @@ def get_device_metadata(db_conn):
     device_metadata = db_conn.get_all(db_conn.STATE_DB, DEVICE_METADATA)
     return device_metadata
 
+def get_transceiver_sub_id(ifindex):
+    """
+    Returns sub OID for transceiver. Sub OID is calculated as folows:
+    +------------+------------+
+    |Interface   |Index       |
+    +------------+------------+
+    |Ethernet[X] |X * 1000    |
+    +------------+------------+
+    ()
+    :param ifindex: interface index
+    :return: sub OID of a port calculated as sub OID = {{index}} * 1000
+    """
+
+    return (ifindex * IFINDEX_SUB_ID_MULTIPLIER, )
+
+def get_transceiver_sensor_sub_id(ifindex, sensor):
+    """
+    Returns sub OID for transceiver sensor. Sub OID is calculated as folows:
+    +-------------------------------------+------------------------------+
+    |Sensor                               |Index                         |
+    +-------------------------------------+------------------------------+
+    |RX Power for Ethernet[X]/[LANEID]    |X * 1000 + LANEID * 10 + 1    |
+    |TX Bias for Ethernet[X]/[LANEID]     |X * 1000 + LANEID * 10 + 2    |
+    |Temperature for Ethernet[X]          |X * 1000 + 1                  |
+    |Voltage for Ethernet[X]/[LANEID]     |X * 1000 + 2                  |
+    +-------------------------------------+------------------------------+
+    ()
+    :param ifindex: interface index
+    :param sensor: sensor key
+    :return: sub OID = {{index}} * 1000 + {{lane}} * 10 + sensor id
+    """
+
+    transceiver_oid, = get_transceiver_sub_id(ifindex)
+    return (transceiver_oid + SENSOR_PART_ID_MAP[sensor], )
 
 def get_redis_pubsub(db_conn, db_name, pattern):
     redis_client = db_conn.get_redis_client(db_name)
@@ -477,12 +491,11 @@ def get_redis_pubsub(db_conn, db_name, pattern):
     pubsub.psubscribe("__keyspace@{}__:{}".format(db, pattern))
     return pubsub
 
-
 class RedisOidTreeUpdater(MIBUpdater):
     def __init__(self, prefix_str):
         super().__init__()
 
-        self.db_conn = Namespace.init_namespace_dbs()
+        self.db_conn = Namespace.init_namespace_dbs() 
         if prefix_str.startswith('.'):
             prefix_str = prefix_str[1:]
         self.prefix_str = prefix_str
@@ -595,7 +608,7 @@ class Namespace:
         db get_all function executed on global and all namespace DBs.
         """
         result = {}
-        # If there are multiple namespaces, _hash might not be
+        # If there are multiple namespaces, _hash might not be 
         # present in all namespace, ignore if not present in a
         # specfic namespace.
         if len(dbs) > 1:
